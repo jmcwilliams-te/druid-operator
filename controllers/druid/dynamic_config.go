@@ -2,7 +2,6 @@ package druid
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 
@@ -13,90 +12,147 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// updateDruidDynamicConfigs updates the Druid cluster's dynamic configurations.
-func updateDruidDynamicConfigs(ctx context.Context, client client.Client, druid *v1alpha1.Druid, emitEvent EventEmitter) error {
-	if druid.Spec.DynamicConfig.Size() == 0 {
-		return nil
-	}
+// updateDruidDynamicConfigs updates the Druid cluster's dynamic configurations
+// for both overlords (middlemanagers) and coordinators.
+func updateDruidDynamicConfigs(
+	ctx context.Context,
+	client client.Client,
+	druid *v1alpha1.Druid,
+	emitEvent EventEmitter,
+) error {
+	nodeTypes := []string{"middlemanagers", "coordinators"}
 
-	svcName, err := druidapi.GetRouterSvcUrl(druid.Namespace, druid.Name, client)
-	if err != nil {
-		emitEvent.EmitEventGeneric(druid, "GetRouterSvcUrlFailed", "Failed to get router service URL", err)
-		return err
-	}
+	for _, nodeType := range nodeTypes {
+		nodeConfig, exists := druid.Spec.Nodes[nodeType]
+		if !exists || nodeConfig.DynamicConfig.Size() == 0 {
+			// Skip if dynamic configurations are not provided for the node type
+			continue
+		}
 
-	basicAuth, err := druidapi.GetAuthCreds(
-		ctx,
-		client,
-		druid.Spec.Auth,
-	)
-	if err != nil {
-		emitEvent.EmitEventGeneric(druid, "GetAuthCredsFailed", "Failed to get authentication credentials", err)
-		return err
-	}
+		dynamicConfig := nodeConfig.DynamicConfig.Raw
 
-	// Create the HTTP client with basic authentication
-	httpClient := internalhttp.NewHTTPClient(
-		&http.Client{},
-		&internalhttp.Auth{BasicAuth: basicAuth},
-	)
+		svcName, err := druidapi.GetRouterSvcUrl(druid.Namespace, druid.Name, client)
+		if err != nil {
+			emitEvent.EmitEventGeneric(
+				druid,
+				"GetRouterSvcUrlFailed",
+				fmt.Sprintf("Failed to get router service URL for %s", nodeType),
+				err,
+			)
+			return err
+		}
 
-	// Define the URL path for dynamic configurations
-	dynamicConfigPath := druidapi.MakePath(svcName, "indexer", "worker")
-
-	// Fetch current dynamic configurations
-	currentResp, err := httpClient.Do(
-		http.MethodGet,
-		dynamicConfigPath,
-		nil,
-	)
-	if err != nil {
-		emitEvent.EmitEventGeneric(druid, "FetchCurrentConfigsFailed", "Failed to fetch current dynamic configurations", err)
-		return err
-	}
-	if currentResp.StatusCode != http.StatusOK {
-		err = fmt.Errorf(
-			"failed to retrieve current Druid dynamic configurations. Status code: %d, Response body: %s",
-			currentResp.StatusCode, string(currentResp.ResponseBody),
+		basicAuth, err := druidapi.GetAuthCreds(
+			ctx,
+			client,
+			druid.Spec.Auth,
 		)
-		emitEvent.EmitEventGeneric(druid, "FetchCurrentConfigsFailed", "Failed to fetch current dynamic configurations", err)
-		return err
+		if err != nil {
+			emitEvent.EmitEventGeneric(
+				druid,
+				"GetAuthCredsFailed",
+				fmt.Sprintf("Failed to get authentication credentials for %s", nodeType),
+				err,
+			)
+			return err
+		}
+
+		// Create the HTTP client with basic authentication
+		httpClient := internalhttp.NewHTTPClient(
+			&http.Client{},
+			&internalhttp.Auth{BasicAuth: basicAuth},
+		)
+
+		// Determine the URL path for dynamic configurations based on the nodeType
+		var dynamicConfigPath string
+		switch nodeType {
+		case "middlemanagers":
+			dynamicConfigPath = druidapi.MakePath(svcName, "indexer", "worker")
+		case "coordinators":
+			dynamicConfigPath = druidapi.MakePath(svcName, "coordinator", "config")
+		default:
+			return fmt.Errorf("unsupported node type: %s", nodeType)
+		}
+
+		// Fetch current dynamic configurations
+		currentResp, err := httpClient.Do(
+			http.MethodGet,
+			dynamicConfigPath,
+			nil,
+		)
+		if err != nil {
+			emitEvent.EmitEventGeneric(
+				druid,
+				"FetchCurrentConfigsFailed",
+				fmt.Sprintf("Failed to fetch current %s dynamic configurations", nodeType),
+				err,
+			)
+			return err
+		}
+		if currentResp.StatusCode != http.StatusOK {
+			err = fmt.Errorf(
+				"failed to retrieve current Druid %s dynamic configurations. Status code: %d, Response body: %s",
+				nodeType, currentResp.StatusCode, string(currentResp.ResponseBody),
+			)
+			emitEvent.EmitEventGeneric(
+				druid,
+				"FetchCurrentConfigsFailed",
+				fmt.Sprintf("Failed to fetch current %s dynamic configurations", nodeType),
+				err,
+			)
+			return err
+		}
+
+		// Handle empty response body
+		var currentConfigsJson string
+		if len(currentResp.ResponseBody) == 0 {
+			currentConfigsJson = "{}" // Initialize as empty JSON object if response body is empty
+		} else {
+			currentConfigsJson = currentResp.ResponseBody
+		}
+
+		// Compare current and desired configurations
+		equal, err := util.IncludesJson(currentConfigsJson, string(dynamicConfig))
+		if err != nil {
+			emitEvent.EmitEventGeneric(
+				druid,
+				"ConfigComparisonFailed",
+				fmt.Sprintf("Failed to compare %s configurations", nodeType),
+				err,
+			)
+			return err
+		}
+		if equal {
+			// Configurations are already up-to-date
+			continue
+		}
+
+		// Update the Druid cluster's dynamic configurations if needed
+		respDynamicConfigs, err := httpClient.Do(
+			http.MethodPost,
+			dynamicConfigPath,
+			dynamicConfig,
+		)
+		if err != nil {
+			emitEvent.EmitEventGeneric(
+				druid,
+				"UpdateConfigsFailed",
+				fmt.Sprintf("Failed to update %s dynamic configurations", nodeType),
+				err,
+			)
+			return err
+		}
+		if respDynamicConfigs.StatusCode != http.StatusOK {
+			return fmt.Errorf("failed to update Druid %s dynamic configurations", nodeType)
+		}
+
+		emitEvent.EmitEventGeneric(
+			druid,
+			"ConfigsUpdated",
+			fmt.Sprintf("Successfully updated %s dynamic configurations", nodeType),
+			nil,
+		)
 	}
 
-	// Handle empty response body
-	var currentConfigsJson string
-	if len(currentResp.ResponseBody) == 0 {
-		currentConfigsJson = "{}" // Initialize as empty JSON object if response body is empty
-	} else {
-		currentConfigsJson = currentResp.ResponseBody
-	}
-
-	// Compare current and desired configurations
-	equal, err := util.IncludesJson(currentConfigsJson, string(druid.Spec.DynamicConfig.Raw))
-	if err != nil {
-		emitEvent.EmitEventGeneric(druid, "ConfigComparisonFailed", "Failed to compare configurations", err)
-		return err
-	}
-	if equal {
-		// Configurations are already up-to-date
-		emitEvent.EmitEventGeneric(druid, "ConfigsUpToDate", "Dynamic configurations are already up-to-date", nil)
-		return nil
-	}
-
-	// Update the Druid cluster's dynamic configurations if needed
-	respDynamicConfigs, err := httpClient.Do(
-		http.MethodPost,
-		dynamicConfigPath,
-		druid.Spec.DynamicConfig.Raw,
-	)
-	if err != nil {
-		emitEvent.EmitEventGeneric(druid, "UpdateConfigsFailed", "Failed to update dynamic configurations", err)
-		return err
-	}
-	if respDynamicConfigs.StatusCode != http.StatusOK {
-		return errors.New("failed to update Druid dynamic configurations")
-	}
-
-	emitEvent.EmitEventGeneric(druid, "ConfigsUpdated", "Successfully updated dynamic configurations", nil)
 	return nil
 }
