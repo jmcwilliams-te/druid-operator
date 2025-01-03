@@ -3371,6 +3371,11 @@ spec:
                       description: DruidPort Used by the `Druid` process.
                       format: int32
                       type: integer
+                    dynamicConfig:
+                      description: Dynamic Configurations for Druid. Applied through
+                        the dynamic configuration API.
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
                     env:
                       description: Env Environment variables for druid containers.
                       items:

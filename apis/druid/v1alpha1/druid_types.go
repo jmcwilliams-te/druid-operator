@@ -490,6 +490,10 @@ type DruidNodeSpec struct {
 	// ServiceAccountName Kubernetes native `serviceAccountName` specification.
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// Dynamic Configurations for Druid. Applied through the dynamic configuration API.
+	// +optional
+	DynamicConfig runtime.RawExtension `json:"dynamicConfig,omitempty"`
 }
 
 // ZookeeperSpec IGNORED (Future API): In order to make Druid dependency setup extensible from within Druid operator.
