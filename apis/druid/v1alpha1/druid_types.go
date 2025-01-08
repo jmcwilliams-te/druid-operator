@@ -284,10 +284,6 @@ type DruidSpec struct {
 	// +optional
 	CoreSite string `json:"core-site.xml,omitempty"`
 
-	// Dynamic Configurations for Druid. Applied through the dynamic configuration API.
-	// +optional
-	DynamicConfig runtime.RawExtension `json:"dynamicConfig,omitempty"`
-
 	// +optional
 	Auth druidapi.Auth `json:"auth,omitempty"`
 }
