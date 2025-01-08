@@ -698,7 +698,6 @@ func (in *DruidSpec) DeepCopyInto(out *DruidSpec) {
 		*out = new(DeepStorageSpec)
 		(*in).DeepCopyInto(*out)
 	}
-	in.DynamicConfig.DeepCopyInto(&out.DynamicConfig)
 	out.Auth = in.Auth
 }
 

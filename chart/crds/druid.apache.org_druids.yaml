@@ -1501,11 +1501,6 @@ spec:
                 description: DisablePVCDeletionFinalizer Whether PVCs shall be deleted
                   on the deletion of the Druid cluster.
                 type: boolean
-              dynamicConfig:
-                description: Dynamic Configurations for Druid. Applied through the
-                  dynamic configuration API.
-                type: object
-                x-kubernetes-preserve-unknown-fields: true
               env:
                 description: Env Environment variables for druid containers.
                 items:
